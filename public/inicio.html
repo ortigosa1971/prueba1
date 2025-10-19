@@ -1,368 +1,510 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Estación Meteorológica</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+// server.js — sesión única con reemplazo y claim atómico
+// Listo para Railway: incluye /health, /salud y raíz '/'
 
-  <!-- Fija tu backend en Railway -->
-<style>
-  body {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-height: 100vh;
-    position: relative;
-    transition: background-color 1s;
-    background: linear-gradient(135deg, #202c3b, #2d3e50);
-    font-family: 'Orbitron', sans-serif;
+const express = require('express');
+const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
+const path = require('path');
+const fs = require('fs');
+const Database = require('better-sqlite3');
+const util = require('util');
+const cors = require('cors');
+
+const app = express();
+app.set('trust proxy', 1);
+
+// ====== CORS (debe ir ANTES de sesión y de las rutas) ======
+const ALLOWED = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim().replace(/\/+$/, '')) // sin barra final
+  .filter(Boolean);
+
+const corsMiddleware = cors({
+  origin(origin, cb) {
+    // Permite healthchecks/CLI sin Origin
+    if (!origin) return cb(null, true);
+    // Si no se configura lista, aceptar todos (útil en pruebas)
+    if (ALLOWED.length === 0) return cb(null, true);
+    const clean = origin.replace(/\/+$/, '');
+    const ok = ALLOWED.includes(clean);
+    cb(ok ? null : new Error('Not allowed by CORS'), ok);
+  },
+  credentials: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+});
+
+// Log de diagnóstico (activar con DEBUG_CORS=1)
+app.use((req, res, next) => {
+  if (process.env.DEBUG_CORS === '1') {
+    console.log('[CORS] Origin:', req.headers.origin, 'Allowed:', ALLOWED);
   }
-  .top-right-button {
-    background: #00bfff;
-    color: #000;
-    padding: 10px 15px;
-    border-radius: 5px;
-    font-weight: bold;
-    cursor: pointer;
-    box-shadow: 0 0 5px rgba(0, 191, 255, 0.5);
+  next();
+});
+
+app.use(corsMiddleware);
+app.options('*', corsMiddleware);
+// Ayuda a caches/proxies
+app.use((req, res, next) => { res.header('Vary', 'Origin'); next(); });
+
+// ====== Carpetas ======
+const DB_DIR = path.join(__dirname, 'db');
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+const PUBLIC_DIR = path.join(__dirname, 'public');
+if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
+
+// ====== Sesiones (SQLite) ======
+const store = new SQLiteStore({ db: 'sessions.sqlite', dir: DB_DIR });
+
+app.use(session({
+  store,
+  secret: process.env.SESSION_SECRET || 'cambia-esta-clave',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    // Cross-site entre dominios → None + Secure
+    sameSite: process.env.SAMESITE || 'none',
+    secure: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
+    maxAge: 1000 * 60 * 60 * 8
   }
-  .weather-screen {
-    background: #000;
-    color: #00bfff;
-    padding: 20px;
-    border-radius: 10px;
-    width: 90%;
-    max-width: 500px;
-    text-align: center;
-    margin-bottom: 20px;
-  }
-  .data-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 15px;
-    margin-top: 10px;
-  }
-  .data-box {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 16px;
-    border-radius: 8px;
-    text-align: center;
-    min-height: 90px;
-    box-shadow: 0 0 6px rgba(0, 191, 255, 0.5);
-  }
-  .label {
-    font-size: 1rem;
-    font-weight: bold;
-  }
-  .value {
-    font-size: 1.6rem;
-    font-weight: bold;
-    margin-top: 5px;
-  }
-  #spinner-mes {
-    display: none;
-    margin: 10px auto;
-    border: 4px solid #f3f3f3;
-    border-top: 4px solid #00bfff;
-    border-radius: 50%;
-    width: 28px;
-    height: 28px;
-    animation: spin 1s linear infinite;
-  }
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-  }
-</style>
-</head>
-<body class="px-2 sm:px-4">
-  <h1 class="text-4xl font-bold text-white mb-4">ALFARNATE</h1>
+}));
 
-  <div class="weather-screen">
-    <h1 class="text-2xl font-bold">📡 Estación Meteorológica en tiempo real cada minuto</h1>
-    <div class="data-grid">
+// Promesas para store.get/destroy
+const storeGet = util.promisify(store.get).bind(store);
+const storeDestroy = util.promisify(store.destroy).bind(store);
 
-      <!-- Tarjeta: Lluvia acumulada (AÑO ACTUAL) -->
-      <div class="bg-slate-800/60 backdrop-blur rounded-2xl p-4 shadow-lg border border-slate-700 w-full max-w-xs">
-        <div class="text-slate-300 text-sm">Lluvia acumulada</div>
-        <div id="total-lluvia" class="text-4xl font-extrabold text-cyan-300 mt-1">--</div>
-        <div id="total-lluvia-rango" class="text-slate-400 text-xs mt-1">(año actual)</div>
-      </div>
+// Body y estáticos
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(express.static(PUBLIC_DIR));
 
-      <div class="data-box"><p class="label">🌡️ Temperatura</p><p class="value" id="temperature">--</p></div>
-      <div class="data-box"><p class="label">💧 Humedad</p><p class="value" id="humidity">--</p></div>
-      <div class="data-box"><p class="label">💨 Viento</p><p class="value" id="wind-speed">--</p></div>
-      <div class="data-box"><p class="label">🧭 Dirección</p><p class="value" id="wind-dir">--</p></div>
-      <div class="data-box"><p class="label">🌧️ Lluvia</p><p class="value" id="rainfall">--</p></div>
-      <div class="data-box"><p class="label">🌍 Presión</p><p class="value" id="pressure">--</p></div>
-      <div class="data-box"><p class="label">☀️ Índice UV</p><p class="value" id="uv-index">--</p></div>
-      <div class="data-box"><p class="label">🕒 Hora</p><p class="value" id="time">--</p></div>
-    </div>
-    <p id="error-message" class="text-red-500 text-sm mt-2 hidden"></p>
-  </div>
+// ====== DB usuarios ======
+const db = new Database(path.join(DB_DIR, 'usuarios.db'));
+db.pragma('journal_mode = wal');
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password TEXT,
+    session_id TEXT
+  )
+`).run();
 
-  <div class="weather-screen">
-    <h2 class="text-xl font-bold mb-4">🔮 Pronóstico de 7 días</h2>
-    <div id="forecast" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-left text-sm sm:text-base"></div>
-  </div>
+// Semilla opcional (solo si no hay admin)
+if (process.env.SEED_ADMIN === '1') {
+  db.prepare("INSERT OR IGNORE INTO users (username, password, session_id) VALUES ('admin','1234',NULL)").run();
+}
 
-  <!-- Selector y gráfico mensual -->
-  <div class="weather-screen">
-    <h2 class="text-xl font-bold mb-2">📅 Lluvia mensual (WU)</h2>
-    <input id="mes-selector" type="month" class="text-black p-1 rounded mb-2"/>
-    <button id="boton-mes" class="top-right-button">Calcular</button>
-    <div id="spinner-mes"></div>
-    <p id="resultado-mes" class="mt-2"></p>
-    <canvas id="grafico-lluvia" width="400" height="200"></canvas>
-  </div>
+const DEBUG = process.env.DEBUG_SINGLE_SESSION === '1';
+const log = (...a) => DEBUG && console.log('[single-session]', ...a);
 
-  <!-- Botón historial -->
-  <div class="weather-screen">
-    <button id="btn-historial" class="top-right-button mt-4 w-full sm:w-auto">📊 Ver Historial</button>
-  </div>
+// ====== Healthcheck (PÚBLICO) ======
+app.get('/health', (req, res) => res.status(200).send('OK'));
+app.get('/salud', (req, res) => res.status(200).send('OK')); // alias
 
-  <!-- Overlay por sesión cerrada -->
-  <div id="overlay-sesion" class="hidden fixed inset-0 bg-white flex items-center justify-center z-50">
-    <p class="text-red-600 text-4xl font-extrabold text-center px-6">
-      ⚠️ Tu sesión ha sido cerrada<br>porque iniciaste sesión en otro dispositivo.
-    </p>
-  </div>
+// ====== Raíz (PÚBLICO) ======
+app.get('/', (req, res) => {
+  const loginFile = path.join(PUBLIC_DIR, 'login.html');
+  if (fs.existsSync(loginFile)) return res.sendFile(loginFile);
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Login</title></head>
+  <body>
+    <h1>Login</h1>
+    <form method="POST" action="/login">
+      <input name="usuario" placeholder="usuario" required>
+      <input type="password" name="password" placeholder="password" required>
+      <button>Entrar</button>
+    </form>
+  </body></html>`);
+});
 
-  <script>
-    // =========================
-    //  CONFIGURACIÓN DE BACKEND
-    // =========================
-    (function initApiBase(){
-      const meta = document.querySelector('meta[name="rail-api-base"]');
-      const fromMeta = meta && meta.getAttribute('content') || '';
-      window.RAIL_API_BASE =
-        (fromMeta && fromMeta.trim()) ||
-        (window.RAIL_API_BASE && String(window.RAIL_API_BASE)) ||
-        (location.origin && String(location.origin)) ||
-        'https://produccion-alemana-d2b4.up.railway.app';
-    })();
+// ====== Helper: autenticar (ajusta a tu lógica real) ======
+function autenticar(username, password) {
+  const row = db.prepare('SELECT username, password, session_id FROM users WHERE username = ?').get(username);
+  if (!row) return null;
+  if (row.password && password && row.password !== password) return null;
+  return row;
+}
 
-    const STATION_ID = 'IALFAR32';
-    const FETCH_OPTS = { cache: 'no-store', credentials: 'include' };
+// ====== LOGIN: reemplaza SIEMPRE la sesión anterior + claim atómico ======
+app.post('/login', async (req, res) => {
+  try {
+    const { usuario, username, password } = req.body;
+    const userField = usuario || username;
+    if (!userField) return res.redirect('/login.html?error=credenciales');
 
-    async function fetchWeatherData() {
-      const url = `${window.RAIL_API_BASE}/api/weather/current?stationId=${encodeURIComponent(STATION_ID)}`;
-      try {
-        const response = await fetch(url, FETCH_OPTS);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const user = autenticar(userField, password);
+    if (!user) return res.redirect('/login.html?error=credenciales');
 
-        const text = await response.text();
-        if (!text) throw new Error('Respuesta vacía');
-        const ct = (response.headers.get('content-type') || '').toLowerCase();
-        if (!ct.includes('application/json')) throw new Error('Respuesta no es JSON');
-        const data = JSON.parse(text);
-
-        const obs = data.observations?.[0] || data.data?.observations?.[0] || data.data?.[0] || data?.observations?.[0];
-        if (!obs) throw new Error("Datos no disponibles.");
-
-        const metric = obs.metric || obs.metrics || {};
-        document.getElementById('temperature').textContent = `${metric.temp ?? '—'} °C`;
-        document.getElementById('humidity').textContent   = `${obs.humidity ?? '—'} %`;
-        document.getElementById('wind-speed').textContent = `${metric.windSpeed ?? '—'} km/h`;
-
-        const dir = Number(obs.winddir);
-        const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
-        const idx = Number.isFinite(dir) ? Math.round(dir / 45) % 8 : null;
-        document.getElementById('wind-dir').textContent = Number.isFinite(dir) ? `${dir}° (${dirs[idx]})` : '—';
-
-        document.getElementById('rainfall').textContent = `${metric.precipTotal ?? '—'} mm`;
-        document.getElementById('pressure').textContent = `${metric.pressure ?? '—'} hPa`;
-        document.getElementById('uv-index').textContent = `${obs.uv ?? '—'}`;
-        const when = obs.obsTimeLocal || obs.obsTimeUtc;
-        document.getElementById('time').textContent = when ? new Date(when).toLocaleString() : '—';
-
-        document.getElementById('error-message').classList.add('hidden');
-      } catch (err) {
-        console.error('⚠️ Error al obtener la meteo:', err);
-        const em = document.getElementById('error-message');
-        if (em) { em.textContent = 'No se pudo obtener la información meteorológica.'; em.classList.remove('hidden'); }
-      }
+    // 1) Si había una sesión previa, EXPULSARLA SIEMPRE (reemplazo automático)
+    if (user.session_id) {
+      await storeDestroy(user.session_id).catch(() => {});
+      db.prepare('UPDATE users SET session_id = NULL WHERE username = ?').run(user.username);
     }
 
-    async function fetchForecast() {
-      // Si prefieres, también puedes proxear Open-Meteo por tu backend
-      const lat = 36.985;
-      const lon = -4.223;
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_min,temperature_2m_max,weathercode,precipitation_probability_max&timezone=auto&forecast_days=7`;
-      try {
-        const res = await fetch(url);
-        const data = await res.json();
-        const forecastDiv = document.getElementById("forecast");
-        const dias = data.daily.time;
-        const min = data.daily.temperature_2m_min;
-        const max = data.daily.temperature_2m_max;
-        const code = data.daily.weathercode;
-        const lluvia = data.daily.precipitation_probability_max;
-        const desc = {
-          0: 'Despejado ☀️', 1: 'Mayormente despejado 🌤️', 2: 'Parcialmente nublado ⛅',
-          3: 'Nublado ☁️', 45: 'Niebla 🌫️', 48: 'Niebla escarchada 🌫️❄️',
-          51: 'Llovizna ligera 🌦️', 53: 'Llovizna moderada 🌧️', 55: 'Llovizna densa 🌧️',
-          61: 'Lluvia ligera 🌦️', 63: 'Lluvia moderada 🌧️', 65: 'Lluvia intensa 🌧️',
-          71: 'Nieve ligera 🌨️', 73: 'Nieve moderada 🌨️', 75: 'Nieve intensa ❄️',
-          80: 'Chubascos ligeros 🌦️', 81: 'Chubascos moderados 🌧️', 82: 'Chubascos fuertes ⛈️'
-        };
-        forecastDiv.innerHTML = '';
-        for (let i = 0; i < dias.length; i++) {
-          const dia = new Date(dias[i]).toLocaleDateString('es-ES', { weekday: 'long' });
-          forecastDiv.innerHTML += `<div><strong>${dia}</strong><br>${desc[code[i]] || 'Clima'}<br>🌡️ ${min[i]}°C - ${max[i]}°C<br>🌧️ ${lluvia[i]}%</div>`;
+    // 2) Regenerar sesión para nuevo SID
+    await new Promise((resolve, reject) => {
+      req.session.regenerate(err => (err ? reject(err) : resolve()));
+    });
+
+    // 3) Claim ATÓMICO
+    const claim = db.prepare(
+      'UPDATE users SET session_id = ? WHERE username = ? AND session_id IS NULL'
+    ).run(req.sessionID, user.username);
+
+    if (claim.changes === 0) {
+      return res.redirect('/login.html?error=sesion_activa');
+    }
+
+    // 4) Completar sesión
+    req.session.usuario = user.username;
+    log('login OK (reemplazo + claim) para', user.username, 'sid:', req.sessionID);
+    return res.redirect('/inicio');
+  } catch (e) {
+    console.error(e);
+    return res.redirect('/login.html?error=interno');
+  }
+});
+
+// ====== Middleware: sesión única ======
+async function requiereSesionUnica(req, res, next) {
+  try {
+    if (!req.session?.usuario) return res.redirect('/login.html');
+
+    const row = db.prepare('SELECT session_id FROM users WHERE username = ?').get(req.session.usuario);
+    if (!row) return res.redirect('/login.html');
+
+    if (!row.session_id) {
+      req.session.destroy(() => res.redirect('/login.html?error=sesion_invalida'));
+      return;
+    }
+
+    if (row.session_id !== req.sessionID) {
+      req.session.destroy(() => res.redirect('/login.html?error=conectado_en_otra_maquina'));
+      return;
+    }
+
+    const sess = await storeGet(row.session_id);
+    if (!sess) {
+      db.prepare('UPDATE users SET session_id = NULL WHERE username = ?').run(req.session.usuario);
+      req.session.destroy(() => res.redirect('/login.html?error=sesion_expirada'));
+      return;
+    }
+
+    next();
+  } catch (e) {
+    console.error(e);
+    res.redirect('/login.html?error=interno');
+  }
+}
+
+// ====== Rutas protegidas ======
+app.get('/inicio', requiereSesionUnica, (req, res) => {
+  const inicioFile = path.join(PUBLIC_DIR, 'inicio.html');
+  if (fs.existsSync(inicioFile)) return res.sendFile(inicioFile);
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Inicio</title></head>
+  <body><h1>Inicio</h1><p>Usuario: ${req.session.usuario}</p>
+  <form method="POST" action="/logout"><button>Salir</button></form>
+  </body></html>`);
+});
+
+app.get('/api/datos', requiereSesionUnica, (req, res) => {
+  res.json({ ok: true, usuario: req.session.usuario, sid: req.sessionID });
+});
+
+// ====== NUEVO: URL del historial (para el front)
+const HISTORIAL_FALLBACK = 'https://prueba2-production-50d4.up.railway.app/';
+app.get('/historial-url', (req, res) => {
+  const url = process.env.HISTORIAL_URL || HISTORIAL_FALLBACK;
+  res.json({ url });
+});
+
+// ====== NUEVO: Redirección directa al historial (protegida)
+app.get('/historial', requiereSesionUnica, (req, res) => {
+  const url = process.env.HISTORIAL_URL || HISTORIAL_FALLBACK;
+  // seguridad básica: solo permitir http(s)
+  try {
+    const u = new URL(url);
+    if (!/^https?:$/.test(u.protocol)) throw new Error('Bad protocol');
+    return res.redirect(u.toString());
+  } catch {
+    return res.status(500).send('Configuración de HISTORIAL_URL inválida');
+  }
+});
+
+// Estado de sesión (PÚBLICO)
+app.get('/verificar-sesion', (req, res) => {
+  res.json({ activo: !!req.session?.usuario });
+});
+
+// ====== Logout ======
+app.post('/logout', (req, res) => {
+  const usuario = req.session?.usuario;
+  const sid = req.sessionID;
+
+  req.session.destroy(async () => {
+    if (usuario) {
+      const row = db.prepare('SELECT session_id FROM users WHERE username = ?').get(usuario);
+      if (row?.session_id === sid) {
+        db.prepare('UPDATE users SET session_id = NULL WHERE username = ?').run(usuario);
+      }
+    }
+    res.redirect('/login.html?msg=logout');
+  });
+});
+
+// ========= RUTA EXISTENTE: total de lluvia acumulada (API externa configurable)
+app.get('/api/lluvia/total', requiereSesionUnica, async (req, res) => {
+  try {
+    const apiUrl = process.env.LLUVIA_API_URL;
+    if (!apiUrl) {
+      return res.status(501).json({ error: 'Config faltante', detalle: 'Define LLUVIA_API_URL en .env con el endpoint de tu API.' });
+    }
+    const r = await fetch(apiUrl);
+    if (!r.ok) throw new Error('API externa HTTP ' + r.status);
+    const datos = await r.json();
+
+    const num = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    if (typeof datos === 'number' || (typeof datos === 'string' && !Number.isNaN(Number(datos)))) {
+      return res.json({ total_mm: num(datos) });
+    }
+
+    if (datos && typeof datos === 'object') {
+      for (const k of ['total_mm','total','acumulado','acumulado_mm','acumulado_dia_mm']) {
+        if (k in datos && (typeof datos[k] === 'number' || typeof datos[k] === 'string')) {
+          return res.json({ total_mm: num(datos[k]) });
         }
-      } catch (e) {
-        document.getElementById("forecast").textContent = "Error al cargar el pronóstico";
-        console.error("Error al obtener pronóstico:", e);
       }
     }
 
-    function mostrarLluviaAcumuladaPorMes() {
-      const stationId = STATION_ID;
-      const mesInput = document.getElementById('mes-selector').value;
-      const resultado = document.getElementById('resultado-mes');
-      const spinner = document.getElementById('spinner-mes');
-      const canvas = document.getElementById('grafico-lluvia');
-      const ctx = canvas.getContext('2d');
+    const arr = Array.isArray(datos) ? datos
+              : (datos && (Array.isArray(datos.items) ? datos.items : (Array.isArray(datos.data) ? datos.data : null)));
 
-      if (!mesInput) {
-        resultado.textContent = "⚠️ Selecciona un mes válido.";
-        return;
+    if (arr) {
+      const pickAccum = (o) => o?.acumulado_mm ?? o?.acumulado ?? o?.acumulado_dia_mm ?? null;
+      let hadAccum = false;
+      let byDate = [];
+      for (const it of arr) {
+        const acc = pickAccum(it);
+        if (acc != null) {
+          hadAccum = true;
+          byDate.push({
+            fecha: it?.fecha || it?.date || it?.timestamp || null,
+            val: num(acc)
+          });
+        }
+      }
+      if (hadAccum) {
+        const withFecha = byDate.filter(x => x.fecha);
+        if (withFecha.length) {
+          withFecha.sort((a,b) => (new Date(a.fecha)) - (new Date(b.fecha)));
+          return res.json({ total_mm: num(withFecha[withFecha.length-1].val) });
+        }
+        const maxVal = byDate.reduce((m,x) => Math.max(m, x.val), 0);
+        return res.json({ total_mm: num(maxVal) });
       }
 
-      const [year, month] = mesInput.split("-");
-      const startDate = `${year}${month}01`;
-      const endDateObj = new Date(+year, parseInt(month,10), 0);
-      const endDay = String(endDateObj.getDate()).padStart(2, '0');
-      const endDate = `${year}${month}${endDay}`;
-
-      const url = `${window.RAIL_API_BASE}/api/weather/history?stationId=${encodeURIComponent(stationId)}&startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`;
-
-      spinner.style.display = "block";
-      resultado.textContent = "🔄 Consultando.";
-      fetch(url, FETCH_OPTS)
-        .then(res => {
-          if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-          return res.json();
-        })
-        .then(data => {
-          const arr = data?.observations || data?.data || [];
-          const dias = arr.map(day => {
-            const fecha = new Date(day.obsTimeLocal || day.obsTimeUtc || day.date || day.day);
-            return Number.isFinite(fecha.getTime()) ? fecha.getDate() : null;
-          });
-          const lluviaDiaria = arr.map(day => (day.metric?.precipTotal ?? day.precipTotal ?? 0) || 0);
-          const total = lluviaDiaria.reduce((a, b) => a + (Number(b) || 0), 0);
-
-          resultado.textContent = `🌧️ Lluvia total en ${month}/${year}: ${total.toFixed(2)} mm`;
-
-          if (window.miGrafico) window.miGrafico.destroy();
-          window.miGrafico = new Chart(ctx, {
-            type: 'bar',
-            data: {
-              labels: dias,
-              datasets: [{
-                label: 'Lluvia diaria (mm)',
-                data: lluviaDiaria,
-              }]
-            },
-            options: {
-              responsive: true,
-              plugins: {
-                legend: { display: false },
-                title: { display: true, text: `Lluvia diaria - ${month}/${year}` }
-              },
-              scales: {
-                y: { beginAtZero: true }
-              }
-            }
-          });
-        })
-        .catch(err => {
-          resultado.textContent = "❌ No se pudieron obtener los datos.";
-          console.error("⚠️ Error al obtener los datos del mes:", err);
-        })
-        .finally(() => {
-          spinner.style.display = "none";
-        });
+      const total = arr.reduce((acc, d) => {
+        const v = d?.mm ?? d?.lluvia ?? d?.precip_mm ?? d?.rain ?? 0;
+        return acc + num(v);
+      }, 0);
+      return res.json({ total_mm: Number(total.toFixed(2)) });
     }
 
-    document.addEventListener("DOMContentLoaded", () => {
-      fetchWeatherData();
-      fetchForecast();
-      setInterval(fetchWeatherData, 60000);
-      const botonMes = document.getElementById("boton-mes");
-      if (botonMes) {
-        botonMes.addEventListener("click", mostrarLluviaAcumuladaPorMes);
+    return res.status(500).json({ error: 'Formato no reconocido', detalle: 'No se encontró un total ni un array utilizable.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'No se pudo calcular el total', detalle: String(e.message || e) });
+  }
+});
+
+// ========= RUTA NUEVA: lluvia acumulada del AÑO ACTUAL (WU)
+// Lluvia acumulada del año actual (incluye HOY)
+app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
+  try {
+    const apiKey = process.env.WU_API_KEY;
+    const stationId = process.env.WU_STATION_ID;
+    if (!apiKey || !stationId) {
+      return res.status(400).json({
+        error: 'config_missing',
+        detalle: 'Define WU_API_KEY y WU_STATION_ID en el .env'
+      });
+    }
+
+    const ahora = new Date(); // hoy (local del servidor)
+    const year = ahora.getFullYear();
+    const pad = (n) => String(n).padStart(2, '0');
+
+    // Rango: 1 de enero -> HOY (inclusive)
+    const startDate = `${year}0101`;
+    const endDate   = `${year}${pad(ahora.getMonth() + 1)}${pad(ahora.getDate())}`;
+
+    const qs = new URLSearchParams({
+      stationId,
+      format: 'json',
+      units: 'm',                 // métricas (mm)
+      startDate,
+      endDate,
+      apiKey,
+      numericPrecision: 'decimal' // evita redondeos extraños
+    });
+
+    const url = `https://api.weather.com/v2/pws/history/daily?${qs.toString()}`;
+
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0',
+        'Accept': 'application/json,text/plain,*/*',
+        'Accept-Language': 'es-ES,es;q=0.9'
+      }
+    });
+    if (!r.ok) throw new Error(`WU HTTP ${r.status}`);
+
+    const data = await r.json();
+    const arr = Array.isArray(data?.observations) ? data.observations : [];
+
+    // "T" (trace) lo contamos como 0.0 mm; si prefieres 0.1 mm, cambia el valor
+    const parsePrecip = (val) => {
+      if (val === 'T') return 0;
+      const n = Number(val);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const totalYear = arr.reduce((acc, d) => {
+      const mm = parsePrecip(d?.metric?.precipTotal);
+      return acc + mm;
+    }, 0);
+
+    return res.json({
+      total_mm: Number(totalYear.toFixed(2)), // total YTD incluyendo hoy
+      year,
+      desde: `${year}-01-01`,
+      hasta: `${year}-${pad(ahora.getMonth() + 1)}-${pad(ahora.getDate())}`,
+      dias_contados: arr.length,
+      origen: 'WU history/daily'
+    });
+  } catch (e) {
+    console.error('Error /api/lluvia/total/year:', e);
+    res.status(500).json({ error: 'calc_failed', detalle: String(e.message || e) });
+  }
+});
+
+
+// ========= PROXIES Weather.com PWS =========
+const UA = process.env.USER_AGENT ||
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
+
+// Condiciones actuales
+app.get('/api/weather/current', requiereSesionUnica, async (req, res) => {
+  try {
+    const apiKey = process.env.WEATHER_API_KEY || process.env.WU_API_KEY;
+    const stationId = req.query.stationId || process.env.WU_STATION_ID;
+    const units = req.query.units || 'm';
+    if (!apiKey || !stationId) {
+      return res.status(400).json({ error: 'config_missing', detalle: 'Faltan WEATHER_API_KEY/WU_API_KEY o WU_STATION_ID' });
+    }
+
+    const url = new URL('https://api.weather.com/v2/pws/observations/current');
+    url.searchParams.set('stationId', stationId);
+    url.searchParams.set('format', 'json');
+    url.searchParams.set('units', units);
+    url.searchParams.set('apiKey', apiKey);
+
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': UA,
+        'Accept': 'application/json,text/plain,*/*',
+        'Accept-Language': 'es-ES,es;q=0.9',
+        'Connection': 'keep-alive'
       }
     });
 
-    // Verificación de sesión activa contra el backend
-    setInterval(async () => {
-      try {
-        const res = await fetch(`${window.RAIL_API_BASE}/verificar-sesion`, FETCH_OPTS);
-        if (res.status === 401) {
-          window.location.href = '/login.html?error=sesion';
-          return;
-        }
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        const text = await res.text();
-        if (!text || !ct.includes('application/json')) return;
-        const data = JSON.parse(text);
-        if (data && data.activo === false) {
-          window.location.href = '/login.html?error=sesion';
-        }
-      } catch (e) {
-        console.debug('verificar-sesion fallo:', e);
-      }
-    }, 1500);
-  </script>
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    const body = await r.text();
 
-  <script>
-  // === Cargar total lluvia del año actual desde tu backend ===
-  (async function cargarTotalLluviaAnual(){
-    const el = document.getElementById('total-lluvia');
-    const rangoEl = document.getElementById('total-lluvia-rango');
-    if (!el) return;
-    try {
-      const r = await fetch(`${window.RAIL_API_BASE}/api/lluvia/total/year`, { credentials: 'include', cache: 'no-store' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const data = await r.json();
-      const mm = Number(data?.total_mm ?? 0);
-      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' mm';
-
-      if (data?.desde && data?.hasta) {
-        rangoEl.textContent = `(${data.year}: ${data.desde} → ${data.hasta})`;
-      } else {
-        rangoEl.textContent = '(año actual)';
-      }
-    } catch (e) {
-      console.error(e);
-      el.textContent = '—';
-      el.title = 'No se pudo cargar la lluvia anual';
+    if (!r.ok) {
+      console.error('Upstream /current error', r.status, ct, body.slice(0, 300));
+      return res.status(r.status).json({ error: 'weather.com denied', status: r.status });
     }
-  })();
-  </script>
-
-<script>
-  (function(){
-    function setUrl(u){
-      var btn = document.getElementById('btn-historial');
-      if (btn) btn.onclick = function(){ window.location.href = u; };
+    if (!ct.includes('application/json')) {
+      console.error('Unexpected content-type /current:', ct, body.slice(0, 300));
+      return res.status(502).json({ error: 'Invalid response from weather.com' });
     }
-    // Fallback por si /historial-url no existe
-    var fallback = 'https://prueba2-production-50d4.up.railway.app/';
-    fetch('/historial-url')
-      .then(function(r){ return r.ok ? r.json() : { url: fallback }; })
-      .then(function(cfg){ setUrl((cfg && cfg.url) || fallback); })
-      .catch(function(){ setUrl(fallback); });
-  })();
-</script>
 
-</body>
-</html>
+    res.set('Cache-Control', 'public, max-age=60');
+    res.type('application/json').send(body);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Weather proxy failed' });
+  }
+});
+
+// Histórico diario
+app.get('/api/weather/history', requiereSesionUnica, async (req, res) => {
+  try {
+    const apiKey = process.env.WEATHER_API_KEY || process.env.WU_API_KEY;
+    const stationId = req.query.stationId || process.env.WU_STATION_ID;
+    const { startDate, endDate } = req.query;
+    const units = req.query.units || 'm';
+    if (!apiKey || !stationId) {
+      return res.status(400).json({ error: 'config_missing', detalle: 'Faltan WEATHER_API_KEY/WU_API_KEY o WU_STATION_ID' });
+    }
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'params_missing', detalle: 'startDate y endDate son obligatorios (YYYYMMDD)' });
+    }
+
+    const url = new URL('https://api.weather.com/v2/pws/history/daily');
+    url.searchParams.set('stationId', stationId);
+    url.searchParams.set('format', 'json');
+    url.searchParams.set('units', units);
+    url.searchParams.set('startDate', startDate);
+    url.searchParams.set('endDate', endDate);
+    url.searchParams.set('apiKey', apiKey);
+
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': UA,
+        'Accept': 'application/json,text/plain,*/*',
+        'Accept-Language': 'es-ES,es;q=0.9',
+        'Connection': 'keep-alive'
+      }
+    });
+
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    const body = await r.text();
+
+    if (!r.ok) {
+      console.error('Upstream /history error', r.status, ct, body.slice(0, 300));
+      return res.status(r.status).json({ error: 'weather.com denied', status: r.status });
+    }
+    if (!ct.includes('application/json')) {
+      console.error('Unexpected content-type /history:', ct, body.slice(0, 300));
+      return res.status(502).json({ error: 'Invalid response from weather.com' });
+    }
+
+    res.set('Cache-Control', 'public, max-age=300');
+    res.type('application/json').send(body);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Weather history proxy failed' });
+  }
+});
+
+// ====== Arranque ======
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, '0.0.0.0', () =>
+  console.log(`🚀 http://0.0.0.0:${PORT} — reemplazo automático de sesión activado`)
+);
+
+
+
+
+
 
 
 
