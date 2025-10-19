@@ -353,7 +353,7 @@
       if (btn) btn.onclick = function(){ window.location.href = u; };
     }
     // Fallback por si /historial-url no existe
-    var fallback = 'https://viejo-production.up.railway.app/';
+    var fallback = 'https://prueba2-production-50d4.up.railway.app/';
     fetch('/historial-url')
       .then(function(r){ return r.ok ? r.json() : { url: fallback }; })
       .then(function(cfg){ setUrl((cfg && cfg.url) || fallback); })
@@ -363,6 +363,58 @@
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
