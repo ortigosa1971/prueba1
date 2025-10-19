@@ -1,6 +1,7 @@
 // server.js — sesión única con reemplazo y claim atómico
 // Listo para Railway: incluye /health, /salud y raíz '/'
 
+/* ====== Dependencias ====== */
 const express = require('express');
 const session = require('express-session');
 const SQLiteStore = require('connect-sqlite3')(session);
@@ -10,10 +11,11 @@ const Database = require('better-sqlite3');
 const util = require('util');
 const cors = require('cors');
 
+/* ====== App ====== */
 const app = express();
 app.set('trust proxy', 1);
 
-// ====== CORS (debe ir ANTES de sesión y de las rutas) ======
+/* ====== CORS (antes de sesión y rutas) ====== */
 const ALLOWED = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map(s => s.trim().replace(/\/+$/, '')) // sin barra final
@@ -23,7 +25,7 @@ const corsMiddleware = cors({
   origin(origin, cb) {
     // Permite healthchecks/CLI sin Origin
     if (!origin) return cb(null, true);
-    // Si no se configura lista, aceptar todos (útil en pruebas)
+    // Si no hay lista configurada, aceptar todos (útil en pruebas)
     if (ALLOWED.length === 0) return cb(null, true);
     const clean = origin.replace(/\/+$/, '');
     const ok = ALLOWED.includes(clean);
@@ -36,7 +38,7 @@ const corsMiddleware = cors({
   optionsSuccessStatus: 204
 });
 
-// Log de diagnóstico (activar con DEBUG_CORS=1)
+// Log de diagnóstico CORS (activar con DEBUG_CORS=1)
 app.use((req, res, next) => {
   if (process.env.DEBUG_CORS === '1') {
     console.log('[CORS] Origin:', req.headers.origin, 'Allowed:', ALLOWED);
@@ -49,13 +51,13 @@ app.options('*', corsMiddleware);
 // Ayuda a caches/proxies
 app.use((req, res, next) => { res.header('Vary', 'Origin'); next(); });
 
-// ====== Carpetas ======
+/* ====== Carpetas ====== */
 const DB_DIR = path.join(__dirname, 'db');
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 const PUBLIC_DIR = path.join(__dirname, 'public');
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
-// ====== Sesiones (SQLite) ======
+/* ====== Sesiones (SQLite) ====== */
 const store = new SQLiteStore({ db: 'sessions.sqlite', dir: DB_DIR });
 
 app.use(session({
@@ -68,7 +70,7 @@ app.use(session({
     // Cross-site entre dominios → None + Secure
     sameSite: process.env.SAMESITE || 'none',
     secure: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
-    maxAge: 1000 * 60 * 60 * 8
+    maxAge: 1000 * 60 * 60 * 8 // 8h
   }
 }));
 
@@ -76,18 +78,18 @@ app.use(session({
 const storeGet = util.promisify(store.get).bind(store);
 const storeDestroy = util.promisify(store.destroy).bind(store);
 
-// Body y estáticos
+/* ====== Body y estáticos ====== */
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(PUBLIC_DIR));
 
-// ====== DB usuarios ======
+/* ====== DB usuarios ====== */
 const db = new Database(path.join(DB_DIR, 'usuarios.db'));
 db.pragma('journal_mode = wal');
 db.prepare(`
   CREATE TABLE IF NOT EXISTS users (
-    username TEXT PRIMARY KEY,
-    password TEXT,
+    username   TEXT PRIMARY KEY,
+    password   TEXT,
     session_id TEXT
   )
 `).run();
@@ -100,26 +102,18 @@ if (process.env.SEED_ADMIN === '1') {
 const DEBUG = process.env.DEBUG_SINGLE_SESSION === '1';
 const log = (...a) => DEBUG && console.log('[single-session]', ...a);
 
-// ====== Healthcheck (PÚBLICO) ======
+/* ====== Healthcheck (PÚBLICO) ====== */
 app.get('/health', (req, res) => res.status(200).send('OK'));
-app.get('/salud', (req, res) => res.status(200).send('OK')); // alias
+app.get('/salud',  (req, res) => res.status(200).send('OK')); // alias
 
-// ====== Raíz (PÚBLICO) ======
+/* ====== Raíz (PÚBLICO) ====== */
 app.get('/', (req, res) => {
   const loginFile = path.join(PUBLIC_DIR, 'login.html');
   if (fs.existsSync(loginFile)) return res.sendFile(loginFile);
-  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Login</title></head>
-  <body>
-    <h1>Login</h1>
-    <form method="POST" action="/login">
-      <input name="usuario" placeholder="usuario" required>
-      <input type="password" name="password" placeholder="password" required>
-      <button>Entrar</button>
-    </form>
-  </body></html>`);
+  res.redirect('/login.html');
 });
 
-// ====== Helper: autenticar (ajusta a tu lógica real) ======
+/* ====== Helper: autenticar (ajusta a tu lógica real) ====== */
 function autenticar(username, password) {
   const row = db.prepare('SELECT username, password, session_id FROM users WHERE username = ?').get(username);
   if (!row) return null;
@@ -127,11 +121,11 @@ function autenticar(username, password) {
   return row;
 }
 
-// ====== LOGIN: reemplaza SIEMPRE la sesión anterior + claim atómico ======
+/* ====== LOGIN: reemplaza SIEMPRE la sesión anterior + claim atómico ====== */
 app.post('/login', async (req, res) => {
   try {
     const { usuario, username, password } = req.body;
-    const userField = usuario || username;
+    const userField = (usuario || username || '').trim();
     if (!userField) return res.redirect('/login.html?error=credenciales');
 
     const user = autenticar(userField, password);
@@ -167,7 +161,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ====== Middleware: sesión única ======
+/* ====== Middleware: sesión única ====== */
 async function requiereSesionUnica(req, res, next) {
   try {
     if (!req.session?.usuario) return res.redirect('/login.html');
@@ -199,7 +193,7 @@ async function requiereSesionUnica(req, res, next) {
   }
 }
 
-// ====== Rutas protegidas ======
+/* ====== Rutas protegidas ====== */
 app.get('/inicio', requiereSesionUnica, (req, res) => {
   const inicioFile = path.join(PUBLIC_DIR, 'inicio.html');
   if (fs.existsSync(inicioFile)) return res.sendFile(inicioFile);
@@ -213,17 +207,16 @@ app.get('/api/datos', requiereSesionUnica, (req, res) => {
   res.json({ ok: true, usuario: req.session.usuario, sid: req.sessionID });
 });
 
-// ====== NUEVO: URL del historial (para el front)
+/* ====== URL del historial (para el front) ====== */
 const HISTORIAL_FALLBACK = 'https://prueba2-production-50d4.up.railway.app/';
 app.get('/historial-url', (req, res) => {
   const url = process.env.HISTORIAL_URL || HISTORIAL_FALLBACK;
   res.json({ url });
 });
 
-// ====== NUEVO: Redirección directa al historial (protegida)
+/* ====== Redirección directa al historial (protegida) ====== */
 app.get('/historial', requiereSesionUnica, (req, res) => {
   const url = process.env.HISTORIAL_URL || HISTORIAL_FALLBACK;
-  // seguridad básica: solo permitir http(s)
   try {
     const u = new URL(url);
     if (!/^https?:$/.test(u.protocol)) throw new Error('Bad protocol');
@@ -233,12 +226,12 @@ app.get('/historial', requiereSesionUnica, (req, res) => {
   }
 });
 
-// Estado de sesión (PÚBLICO)
+/* ====== Estado de sesión (PÚBLICO) ====== */
 app.get('/verificar-sesion', (req, res) => {
   res.json({ activo: !!req.session?.usuario });
 });
 
-// ====== Logout ======
+/* ====== Logout ====== */
 app.post('/logout', (req, res) => {
   const usuario = req.session?.usuario;
   const sid = req.sessionID;
@@ -254,13 +247,14 @@ app.post('/logout', (req, res) => {
   });
 });
 
-// ========= RUTA EXISTENTE: total de lluvia acumulada (API externa configurable)
+/* ========= RUTA EXISTENTE: total de lluvia acumulada (API externa configurable) ========= */
 app.get('/api/lluvia/total', requiereSesionUnica, async (req, res) => {
   try {
     const apiUrl = process.env.LLUVIA_API_URL;
     if (!apiUrl) {
       return res.status(501).json({ error: 'Config faltante', detalle: 'Define LLUVIA_API_URL en .env con el endpoint de tu API.' });
     }
+
     const r = await fetch(apiUrl);
     if (!r.ok) throw new Error('API externa HTTP ' + r.status);
     const datos = await r.json();
@@ -323,7 +317,9 @@ app.get('/api/lluvia/total', requiereSesionUnica, async (req, res) => {
   }
 });
 
-// ========= RUTA NUEVA: lluvia acumulada del AÑO ACTUAL (WU)
+/* ========= RUTA NUEVA: Lluvia acumulada del AÑO ACTUAL (WU) =========
+   Suma desde el 1 de enero del año actual hasta HOY (inclusive) usando WU PWS.
+*/
 app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   try {
     const apiKey = process.env.WU_API_KEY;
@@ -335,35 +331,68 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
       });
     }
 
-    const ahora = new Date();
+    const ahora = new Date(); // hoy (local del servidor)
     const year = ahora.getFullYear();
     const pad = (n) => String(n).padStart(2, '0');
-    const startDate = `${year}0101`;
-    const endDate = `${year}${pad(ahora.getMonth() + 1)}${pad(ahora.getDate())}`;
 
-    const url = `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}&format=json&units=m&startDate=${startDate}&endDate=${endDate}&apiKey=${encodeURIComponent(apiKey)}`;
+    // Rango: 1 de enero -> HOY (inclusive)
+    const startDate = `${year}0101`;
+    const endDate   = `${year}${pad(ahora.getMonth() + 1)}${pad(ahora.getDate())}`;
+
+    const qs = new URLSearchParams({
+      stationId,
+      format: 'json',
+      units: 'm',                 // métricas (mm)
+      startDate,
+      endDate,
+      apiKey,
+      numericPrecision: 'decimal' // evita redondeos extraños
+    });
+
+    const url = `https://api.weather.com/v2/pws/history/daily?${qs.toString()}`;
 
     const r = await fetch(url, {
       headers: {
-        'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari',
+        'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0',
         'Accept': 'application/json,text/plain,*/*',
         'Accept-Language': 'es-ES,es;q=0.9'
       }
     });
     if (!r.ok) throw new Error(`WU HTTP ${r.status}`);
-    const data = await r.json();
 
+    const data = await r.json();
     const arr = Array.isArray(data?.observations) ? data.observations : [];
+
+    if (arr.length === 0) {
+      return res.json({
+        total_mm: 0,
+        year,
+        desde: `${year}-01-01`,
+        hasta: `${year}-${pad(ahora.getMonth() + 1)}-${pad(ahora.getDate())}`,
+        dias_contados: 0,
+        origen: 'WU history/daily',
+        aviso: 'Sin datos para el rango/estación'
+      });
+    }
+
+    // "T" (trace) lo contamos como 0.0 mm; si prefieres 0.1 mm, cambia el valor
+    const parsePrecip = (val) => {
+      if (val === 'T') return 0;
+      const n = Number(val);
+      return Number.isFinite(n) ? n : 0;
+    };
+
     const totalYear = arr.reduce((acc, d) => {
-      const mm = Number(d?.metric?.precipTotal ?? 0);
-      return acc + (Number.isFinite(mm) ? mm : 0);
+      const mm = parsePrecip(d?.metric?.precipTotal);
+      return acc + mm;
     }, 0);
 
     return res.json({
-      total_mm: Number(totalYear.toFixed(2)),
+      total_mm: Number(totalYear.toFixed(2)), // total YTD incluyendo hoy
       year,
       desde: `${year}-01-01`,
       hasta: `${year}-${pad(ahora.getMonth() + 1)}-${pad(ahora.getDate())}`,
+      dias_contados: arr.length,
       origen: 'WU history/daily'
     });
   } catch (e) {
@@ -372,7 +401,7 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   }
 });
 
-// ========= PROXIES Weather.com PWS =========
+/* ========= PROXIES Weather.com PWS ========= */
 const UA = process.env.USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
 
@@ -391,6 +420,7 @@ app.get('/api/weather/current', requiereSesionUnica, async (req, res) => {
     url.searchParams.set('format', 'json');
     url.searchParams.set('units', units);
     url.searchParams.set('apiKey', apiKey);
+    url.searchParams.set('numericPrecision', 'decimal');
 
     const r = await fetch(url, {
       headers: {
@@ -442,6 +472,7 @@ app.get('/api/weather/history', requiereSesionUnica, async (req, res) => {
     url.searchParams.set('startDate', startDate);
     url.searchParams.set('endDate', endDate);
     url.searchParams.set('apiKey', apiKey);
+    url.searchParams.set('numericPrecision', 'decimal');
 
     const r = await fetch(url, {
       headers: {
@@ -472,12 +503,11 @@ app.get('/api/weather/history', requiereSesionUnica, async (req, res) => {
   }
 });
 
-// ====== Arranque ======
+/* ====== Arranque ====== */
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () =>
   console.log(`🚀 http://0.0.0.0:${PORT} — reemplazo automático de sesión activado`)
 );
-
 
 
 
