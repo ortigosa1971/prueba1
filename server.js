@@ -1,5 +1,5 @@
-// server.js — sesión única + APIs Weather.com (WU) + lluvia YTD robusta
-// Node 18/20 (fetch nativo). Listo para Railway.
+// server.js — sesión única + APIs Weather.com (WU) + lluvia YTD por meses
+// Node >=18 (fetch nativo). Listo para Railway.
 
 const express = require('express');
 const session = require('express-session');
@@ -102,9 +102,8 @@ app.post('/login', async (req, res) => {
 
     if (user.session_id) {
       await storeDestroy(user.session_id).catch(()=>{});
-      db.prepare('UPDATE users SET session_id = NULL WHERE username=?').run(user.username);
+      db.prepare('UPDATE users SET session_id=NULL WHERE username=?').run(user.username);
     }
-
     await new Promise((resolve,reject)=> req.session.regenerate(err=>err?reject(err):resolve()));
     const claim = db.prepare('UPDATE users SET session_id=? WHERE username=? AND session_id IS NULL')
                     .run(req.sessionID, user.username);
@@ -127,8 +126,11 @@ async function requiereSesionUnica(req, res, next) {
     if (!row.session_id) { req.session.destroy(()=>res.redirect('/login.html?error=sesion_invalida')); return; }
     if (row.session_id !== req.sessionID) { req.session.destroy(()=>res.redirect('/login.html?error=conectado_en_otra_maquina')); return; }
     const sess = await storeGet(row.session_id);
-    if (!sess) { db.prepare('UPDATE users SET session_id=NULL WHERE username=?').run(req.session.usuario);
-      req.session.destroy(()=>res.redirect('/login.html?error=sesion_expirada')); return; }
+    if (!sess) {
+      db.prepare('UPDATE users SET session_id=NULL WHERE username=?').run(req.session.usuario);
+      req.session.destroy(()=>res.redirect('/login.html?error=sesion_expirada'));
+      return;
+    }
     next();
   } catch (e) { console.error(e); res.redirect('/login.html?error=interno'); }
 }
@@ -139,6 +141,7 @@ app.get('/inicio', requiereSesionUnica, (req, res) => {
   if (fs.existsSync(f)) return res.sendFile(f);
   res.type('html').send(`<h1>Inicio</h1><p>Usuario: ${req.session.usuario}</p>`);
 });
+
 app.post('/logout', (req, res) => {
   const usuario = req.session?.usuario;
   const sid = req.sessionID;
@@ -151,12 +154,18 @@ app.post('/logout', (req, res) => {
   });
 });
 
-/* ============ Verificar sesión (⬅️ esta faltaba; causaba 404) ============ */
+/* ============ Verificar sesión (front lo usa) ============ */
 app.get('/verificar-sesion', (req, res) => {
   res.json({ activo: !!req.session?.usuario });
 });
 
-/* ============ Proxies WU (⬅️ estas faltaban; causaban 404) ============ */
+/* ============ Historial URL (front lo usa) ============ */
+const HISTORIAL_FALLBACK = 'https://prueba2-production-50d4.up.railway.app/';
+app.get('/historial-url', (req, res) => {
+  res.json({ url: process.env.HISTORIAL_URL || HISTORIAL_FALLBACK });
+});
+
+/* ============ Proxies Weather.com PWS ============ */
 const UA = process.env.USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari';
 
@@ -210,55 +219,85 @@ app.get('/api/weather/history', requiereSesionUnica, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error:'Weather history proxy failed' }); }
 });
 
-/* ============ Lluvia acumulada (YTD) ============ */
+/* ============ Lluvia acumulada (YTD) por meses (evita 502) ============ */
 app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   try {
-    const apiKey = process.env.WU_API_KEY;
+    const apiKey    = process.env.WU_API_KEY;
     const stationId = process.env.WU_STATION_ID;
     if (!apiKey || !stationId) return res.status(400).json({ error:'config_missing', detalle:'Define WU_API_KEY y WU_STATION_ID' });
 
-    const now = new Date();
-    const year = now.getFullYear();
-    const pad = n => String(n).padStart(2,'0');
-    const startDate = `${year}0101`;
-    const endDate   = `${year}${pad(now.getMonth()+1)}${pad(now.getDate())}`;
+    const now  = new Date();
+    const YEAR = now.getFullYear();
+    const pad  = (n) => String(n).padStart(2,'0');
 
-    const url = `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}&format=json&units=m&startDate=${startDate}&endDate=${endDate}&numericPrecision=decimal&apiKey=${encodeURIComponent(apiKey)}`;
-
-    const r = await fetch(url, { headers: { 'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0', 'Accept':'application/json,text/plain,*/*', 'Accept-Language':'es-ES,es;q=0.9' }});
-    const ct = (r.headers.get('content-type') || '').toLowerCase();
-    const text = await r.text();
-    if (!r.ok || !ct.includes('application/json')) {
-      console.error('[WU YTD] status=', r.status, 'ct=', ct, 'body=', text.slice(0,300));
-      return res.status(502).json({ error:'upstream_error', detalle:`WU ${r.status} CT=${ct}`, muestra:text.slice(0,300) });
-    }
-
-    const data = JSON.parse(text);
-    const obs = Array.isArray(data?.observations) ? data.observations : [];
-    if (obs.length === 0) {
-      return res.json({ total_mm: 0, year, desde:`${year}-01-01`, hasta:`${year}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`, dias_contados: 0, origen:'WU history/daily', aviso:'observations vacío' });
-    }
-
-    const toNum = v => (v === 'T' ? 0 : (Number.isFinite(Number(v)) ? Number(v) : null));
-    const in2mm = inch => inch * 25.4;
-    const getDayMm = d => {
-      let v = toNum(d?.metric?.precipTotal);            if (v != null) return v;
-      v = toNum(d?.imperial?.precipTotal);              if (v != null) return in2mm(v);
-      v = toNum(d?.precipTotal);                        if (v != null) return v;
-      v = toNum(d?.metric?.precip);                     if (v != null) return v;
-      v = toNum(d?.precip);                             if (v != null) return v;
-      v = toNum(d?.imperial?.precip);                   if (v != null) return in2mm(v);
+    const toNum = (v) => v === 'T' ? 0 : (Number.isFinite(Number(v)) ? Number(v) : null);
+    const in2mm = (inch) => inch * 25.4;
+    const dayMm = (d) => {
+      let v = toNum(d?.metric?.precipTotal); if (v != null) return v;
+      v = toNum(d?.imperial?.precipTotal);   if (v != null) return in2mm(v);
+      v = toNum(d?.precipTotal);             if (v != null) return v;
+      v = toNum(d?.metric?.precip);          if (v != null) return v;
+      v = toNum(d?.precip);                  if (v != null) return v;
+      v = toNum(d?.imperial?.precip);        if (v != null) return in2mm(v);
       return 0;
     };
 
-    const items = obs.map(d => ({ fecha: d?.obsTimeLocal || d?.obsTimeUtc || null, mm: getDayMm(d), m_total:d?.metric?.precipTotal ?? null, i_total:d?.imperial?.precipTotal ?? null }));
-    const total = items.reduce((a,x)=> a + (Number.isFinite(x.mm) ? x.mm : 0), 0);
-
-    if (req.query.debug === '1') {
-      return res.json({ total_mm: Number(total.toFixed(2)), year, desde:`${year}-01-01`, hasta:`${year}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`, dias_contados: items.length, origen:'WU history/daily', muestra: items.slice(-10) });
+    async function fetchRange(startDate, endDate) {
+      const u = `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}&format=json&units=m&startDate=${startDate}&endDate=${endDate}&numericPrecision=decimal&apiKey=${encodeURIComponent(apiKey)}`;
+      const r = await fetch(u, { headers: { 'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0', 'Accept':'application/json,text/plain,*/*', 'Accept-Language':'es-ES,es;q=0.9' }});
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      const text = await r.text();
+      if (!r.ok || !ct.includes('application/json')) {
+        console.warn('[WU chunk] status=', r.status, 'ct=', ct, 'range=', startDate, endDate, 'body=', text.slice(0,200));
+        return { observations: [] }; // continuamos con el resto
+      }
+      try { return JSON.parse(text); } catch { return { observations: [] }; }
     }
 
-    res.json({ total_mm: Number(total.toFixed(2)), year, desde:`${year}-01-01`, hasta:`${year}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`, dias_contados: items.length, origen:'WU history/daily' });
+    // Recorremos enero → hoy, mes a mes, acumulando por día (evitar duplicados)
+    const perDay = new Map(); // YYYY-MM-DD -> mm
+    for (let m = 0; m < 12; m++) {
+      const monthStart = new Date(YEAR, m, 1);
+      if (monthStart > now) break;
+      const monthEnd = new Date(YEAR, m + 1, 0);
+      const end = monthEnd > now ? now : monthEnd;
+
+      const startDate = `${YEAR}${pad(m+1)}01`;
+      const endDate   = `${YEAR}${pad(end.getMonth()+1)}${pad(end.getDate())}`;
+
+      const data = await fetchRange(startDate, endDate);
+      const obs = Array.isArray(data?.observations) ? data.observations : [];
+      for (const d of obs) {
+        const iso = (d?.obsTimeLocal || d?.obsTimeUtc || '').slice(0,10); // YYYY-MM-DD
+        if (!iso) continue;
+        const mm = dayMm(d);
+        perDay.set(iso, Math.max(perDay.get(iso) || 0, mm));
+      }
+    }
+
+    const lista = Array.from(perDay.entries()).sort((a,b)=> a[0].localeCompare(b[0]));
+    const total = lista.reduce((acc, [,mm]) => acc + (Number.isFinite(mm)? mm : 0), 0);
+
+    if (req.query.debug === '1') {
+      return res.json({
+        year: YEAR,
+        desde: `${YEAR}-01-01`,
+        hasta: `${YEAR}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`,
+        dias_contados: lista.length,
+        total_mm: Number(total.toFixed(2)),
+        muestra: lista.slice(-10).map(([fecha,mm]) => ({ fecha, mm }))
+      });
+    }
+
+    res.json({
+      year: YEAR,
+      desde: `${YEAR}-01-01`,
+      hasta: `${YEAR}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`,
+      dias_contados: lista.length,
+      total_mm: Number(total.toFixed(2)),
+      origen: 'WU history/daily (mensual)'
+    });
+
   } catch (e) {
     console.error('Error /api/lluvia/total/year:', e);
     res.status(500).json({ error:'calc_failed', detalle:String(e.message || e) });
@@ -268,5 +307,5 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
 /* ============ Arranque ============ */
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () =>
-  console.log(`🚀 http://0.0.0.0:${PORT} — listo (rutas: /verificar-sesion, /api/weather/current, /api/lluvia/total/year)`)
+  console.log(`🚀 http://0.0.0.0:${PORT} — listo (rutas: /verificar-sesion, /api/weather/*, /api/lluvia/total/year)`)
 );
