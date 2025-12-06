@@ -331,7 +331,7 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const mm = Number(data?.total_mm ?? 0);
-      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' mm';
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m2';
 
       if (data?.desde && data?.hasta) {
         rangoEl.textContent = `(${data.year}: ${data.desde} → ${data.hasta})`;
