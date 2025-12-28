@@ -224,14 +224,17 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   try {
     const apiKey    = process.env.WU_API_KEY;
     const stationId = process.env.WU_STATION_ID;
-    if (!apiKey || !stationId) return res.status(400).json({ error:'config_missing', detalle:'Define WU_API_KEY y WU_STATION_ID' });
+    if (!apiKey || !stationId) {
+      return res.status(400).json({ error:'config_missing', detalle:'Define WU_API_KEY y WU_STATION_ID' });
+    }
 
     const now  = new Date();
     const YEAR = now.getFullYear();
     const pad  = (n) => String(n).padStart(2,'0');
 
-    const toNum = (v) => v === 'T' ? 0 : (Number.isFinite(Number(v)) ? Number(v) : null);
+    const toNum = (v) => (v === 'T' ? 0 : (Number.isFinite(Number(v)) ? Number(v) : null));
     const in2mm = (inch) => inch * 25.4;
+
     const dayMm = (d) => {
       let v = toNum(d?.metric?.precipTotal); if (v != null) return v;
       v = toNum(d?.imperial?.precipTotal);   if (v != null) return in2mm(v);
@@ -243,13 +246,25 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
     };
 
     async function fetchRange(startDate, endDate) {
-      const u = `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}&format=json&units=m&startDate=${startDate}&endDate=${endDate}&numericPrecision=decimal&apiKey=${encodeURIComponent(apiKey)}`;
-      const r = await fetch(u, { headers: { 'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0', 'Accept':'application/json,text/plain,*/*', 'Accept-Language':'es-ES,es;q=0.9' }});
+      const u =
+        `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}` +
+        `&format=json&units=m&startDate=${startDate}&endDate=${endDate}` +
+        `&numericPrecision=decimal&apiKey=${encodeURIComponent(apiKey)}`;
+
+      const r = await fetch(u, {
+        headers: {
+          'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0',
+          'Accept': 'application/json,text/plain,*/*',
+          'Accept-Language': 'es-ES,es;q=0.9'
+        }
+      });
+
       const ct = (r.headers.get('content-type') || '').toLowerCase();
       const text = await r.text();
+
       if (!r.ok || !ct.includes('application/json')) {
         console.warn('[WU chunk] status=', r.status, 'ct=', ct, 'range=', startDate, endDate, 'body=', text.slice(0,200));
-        return { observations: [] }; // continuamos con el resto
+        return { observations: [] };
       }
       try { return JSON.parse(text); } catch { return { observations: [] }; }
     }
@@ -259,50 +274,53 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
     for (let m = 0; m < 12; m++) {
       const monthStart = new Date(YEAR, m, 1);
       if (monthStart > now) break;
+
       const monthEnd = new Date(YEAR, m + 1, 0);
       const end = monthEnd > now ? now : monthEnd;
 
-      const startDate = `${YEAR}${pad(m+1)}01`;
-      const endDate   = `${YEAR}${pad(end.getMonth()+1)}${pad(end.getDate())}`;
+      const startDate = `${YEAR}${pad(m + 1)}01`;
+      const endDate   = `${YEAR}${pad(end.getMonth() + 1)}${pad(end.getDate())}`;
 
       const data = await fetchRange(startDate, endDate);
       const obs = Array.isArray(data?.observations) ? data.observations : [];
+
       for (const d of obs) {
-        const iso = (d?.obsTimeLocal || d?.obsTimeUtc || '').slice(0,10); // YYYY-MM-DD
+        const iso = (d?.obsTimeLocal || d?.obsTimeUtc || '').slice(0, 10); // YYYY-MM-DD
         if (!iso) continue;
         const mm = dayMm(d);
         perDay.set(iso, Math.max(perDay.get(iso) || 0, mm));
       }
     }
 
-    const lista = Array.from(perDay.entries()).sort((a,b)=> a[0].localeCompare(b[0]));
-    const total = lista.reduce((acc, [,mm]) => acc + (Number.isFinite(mm)? mm : 0), 0);
+    const lista = Array.from(perDay.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    const total = lista.reduce((acc, [, mm]) => acc + (Number.isFinite(mm) ? mm : 0), 0);
 
     if (req.query.debug === '1') {
       return res.json({
         year: YEAR,
         desde: `${YEAR}-01-01`,
-        hasta: `${YEAR}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`,
+        hasta: `${YEAR}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
         dias_contados: lista.length,
         total_mm: Number(total.toFixed(2)),
-        muestra: lista.slice(-10).map(([fecha,mm]) => ({ fecha, mm }),
+        muestra: lista.slice(-10).map(([fecha, mm]) => ({ fecha, mm })),
       });
     }
 
-    res.json({
+    return res.json({
       year: YEAR,
       desde: `${YEAR}-01-01`,
-      hasta: `${YEAR}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`,
+      hasta: `${YEAR}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
       dias_contados: lista.length,
-      total_mm: Number((total.toFixed(2)),
+      total_mm: Number(total.toFixed(2)),
       origen: 'WU history/daily (mensual)'
     });
 
   } catch (e) {
     console.error('Error /api/lluvia/total/year:', e);
-    res.status(500).json({ error:'calc_failed', detalle:String(e.message || e) });
+    return res.status(500).json({ error:'calc_failed', detalle:String(e.message || e) });
   }
 });
+
 
 /* ============ Arranque ============ */
 const PORT = process.env.PORT || 8080;
