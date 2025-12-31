@@ -301,7 +301,7 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
         desde: `${YEAR}-09-01`,
         hasta: `${YEAR}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
         dias_contados: lista.length,
-        total_mm: Number(total.toFixed(2) + 200),
+        total_mm: Number(total.toFixed(2)) + 200,
         muestra: lista.slice(-10).map(([fecha, mm]) => ({ fecha, mm })),
       });
     }
@@ -311,7 +311,7 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
       desde: `${YEAR}-09-01`,
       hasta: `${YEAR}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
       dias_contados: lista.length,
-      total_mm: Number(total.toFixed(2) + 200),
+      total_mm: Number(total.toFixed(2)) + 200,
       origen: 'WU history/daily (mensual)'
     });
 
