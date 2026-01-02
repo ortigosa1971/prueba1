@@ -220,6 +220,94 @@ app.get('/api/weather/history', requiereSesionUnica, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error:'Weather history proxy failed' }); }
 });
 
+/* ============ Función auxiliar para calcular lluvia por rango de fechas ============ */
+async function calcularLluviaRango(startDate, endDate, aplicarFix2025 = false) {
+  const apiKey = process.env.WU_API_KEY;
+  const stationId = process.env.WU_STATION_ID;
+
+  const toNum = (v) => (v === 'T' ? 0 : (Number.isFinite(Number(v)) ? Number(v) : null));
+  const in2mm = (inch) => inch * 25.4;
+
+  const dayMm = (d) => {
+    let v = toNum(d?.metric?.precipTotal); if (v != null) return v;
+    v = toNum(d?.imperial?.precipTotal);   if (v != null) return in2mm(v);
+    v = toNum(d?.precipTotal);             if (v != null) return v;
+    v = toNum(d?.metric?.precip);          if (v != null) return v;
+    v = toNum(d?.precip);                  if (v != null) return v;
+    v = toNum(d?.imperial?.precip);        if (v != null) return in2mm(v);
+    return 0;
+  };
+
+  async function fetchRange(startDate, endDate) {
+    const u =
+      `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}` +
+      `&format=json&units=m&startDate=${startDate}&endDate=${endDate}` +
+      `&numericPrecision=decimal&apiKey=${encodeURIComponent(apiKey)}`;
+
+    const r = await fetch(u, {
+      headers: {
+        'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0',
+        'Accept': 'application/json,text/plain,*/*',
+        'Accept-Language': 'es-ES,es;q=0.9'
+      }
+    });
+
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    const text = await r.text();
+
+    if (!r.ok || !ct.includes('application/json')) {
+      console.warn('[WU chunk] status=', r.status, 'ct=', ct, 'range=', startDate, endDate, 'body=', text.slice(0,200));
+      return { observations: [] };
+    }
+    try { return JSON.parse(text); } catch { return { observations: [] }; }
+  }
+
+  const perDay = new Map();
+  const pad = (n) => String(n).padStart(2,'0');
+
+  // Recorremos mes a mes
+  let currentDate = new Date(startDate);
+  const endDateObj = new Date(endDate);
+  
+  while (currentDate <= endDateObj) {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    
+    const monthStart = new Date(year, month, 1);
+    const monthEnd = new Date(year, month + 1, 0);
+    const end = monthEnd > endDateObj ? endDateObj : monthEnd;
+
+    const startDateStr = `${year}${pad(month + 1)}01`;
+    const endDateStr = `${end.getFullYear()}${pad(end.getMonth() + 1)}${pad(end.getDate())}`;
+
+    const data = await fetchRange(startDateStr, endDateStr);
+    const obs = Array.isArray(data?.observations) ? data.observations : [];
+
+    for (const d of obs) {
+      const iso = (d?.obsTimeLocal || d?.obsTimeUtc || '').slice(0, 10);
+      if (!iso) continue;
+      const mm = dayMm(d);
+      perDay.set(iso, Math.max(perDay.get(iso) || 0, mm));
+    }
+
+    currentDate = new Date(year, month + 1, 1);
+  }
+
+  const lista = Array.from(perDay.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  let total = lista.reduce((acc, [, mm]) => acc + (Number.isFinite(mm) ? mm : 0), 0);
+
+  // Aplicar fix de +200 para 2025 si es necesario
+  if (aplicarFix2025) {
+    total += 200;
+  }
+
+  return {
+    dias_contados: lista.length,
+    total_mm: Number(total.toFixed(2)),
+    datos: lista
+  };
+}
+
 /* ============ Lluvia acumulada (YTD) por meses (año hidrológico) ============ */
 app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   try {
@@ -250,87 +338,18 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
       hydroEnd = now;
     }
 
-    const toNum = (v) => (v === 'T' ? 0 : (Number.isFinite(Number(v)) ? Number(v) : null));
-    const in2mm = (inch) => inch * 25.4;
-
-    const dayMm = (d) => {
-      let v = toNum(d?.metric?.precipTotal); if (v != null) return v;
-      v = toNum(d?.imperial?.precipTotal);   if (v != null) return in2mm(v);
-      v = toNum(d?.precipTotal);             if (v != null) return v;
-      v = toNum(d?.metric?.precip);          if (v != null) return v;
-      v = toNum(d?.precip);                  if (v != null) return v;
-      v = toNum(d?.imperial?.precip);        if (v != null) return in2mm(v);
-      return 0;
-    };
-
-    async function fetchRange(startDate, endDate) {
-      const u =
-        `https://api.weather.com/v2/pws/history/daily?stationId=${encodeURIComponent(stationId)}` +
-        `&format=json&units=m&startDate=${startDate}&endDate=${endDate}` +
-        `&numericPrecision=decimal&apiKey=${encodeURIComponent(apiKey)}`;
-
-      const r = await fetch(u, {
-        headers: {
-          'User-Agent': process.env.USER_AGENT || 'Mozilla/5.0',
-          'Accept': 'application/json,text/plain,*/*',
-          'Accept-Language': 'es-ES,es;q=0.9'
-        }
-      });
-
-      const ct = (r.headers.get('content-type') || '').toLowerCase();
-      const text = await r.text();
-
-      if (!r.ok || !ct.includes('application/json')) {
-        console.warn('[WU chunk] status=', r.status, 'ct=', ct, 'range=', startDate, endDate, 'body=', text.slice(0,200));
-        return { observations: [] };
-      }
-      try { return JSON.parse(text); } catch { return { observations: [] }; }
-    }
-
-    // Recorremos mes a mes desde septiembre hasta junio (o fecha actual)
-    const perDay = new Map(); // YYYY-MM-DD -> mm
-    let currentDate = new Date(hydroStart);
-    
-    while (currentDate <= hydroEnd) {
-      const year = currentDate.getFullYear();
-      const month = currentDate.getMonth();
-      
-      // Primer día del mes
-      const monthStart = new Date(year, month, 1);
-      // Último día del mes o fecha límite
-      const monthEnd = new Date(year, month + 1, 0);
-      const end = monthEnd > hydroEnd ? hydroEnd : monthEnd;
-
-      const startDate = `${year}${pad(month + 1)}01`;
-      const endDate = `${end.getFullYear()}${pad(end.getMonth() + 1)}${pad(end.getDate())}`;
-
-      const data = await fetchRange(startDate, endDate);
-      const obs = Array.isArray(data?.observations) ? data.observations : [];
-
-      for (const d of obs) {
-        const iso = (d?.obsTimeLocal || d?.obsTimeUtc || '').slice(0, 10); // YYYY-MM-DD
-        if (!iso) continue;
-        const mm = dayMm(d);
-        perDay.set(iso, Math.max(perDay.get(iso) || 0, mm));
-      }
-
-      // Pasar al siguiente mes
-      currentDate = new Date(year, month + 1, 1);
-    }
-
-    const lista = Array.from(perDay.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-    const total = lista.reduce((acc, [, mm]) => acc + (Number.isFinite(mm) ? mm : 0), 0);
-
     const formatDate = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    
+    const resultado = await calcularLluviaRango(hydroStart, hydroEnd, false);
 
     if (req.query.debug === '1') {
       return res.json({
         year: `${hydroYear}/${hydroYear + 1}`,
         desde: formatDate(hydroStart),
         hasta: formatDate(hydroEnd),
-        dias_contados: lista.length,
-        total_mm: Number(total.toFixed(2)) + 200,
-        muestra: lista.slice(-10).map(([fecha, mm]) => ({ fecha, mm })),
+        dias_contados: resultado.dias_contados,
+        total_mm: resultado.total_mm + 200,
+        muestra: resultado.datos.slice(-10).map(([fecha, mm]) => ({ fecha, mm })),
       });
     }
 
@@ -338,8 +357,8 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
       year: `${hydroYear}/${hydroYear + 1}`,
       desde: formatDate(hydroStart),
       hasta: formatDate(hydroEnd),
-      dias_contados: lista.length,
-      total_mm: Number(total.toFixed(2)) + 200,
+      dias_contados: resultado.dias_contados,
+      total_mm: resultado.total_mm + 200,
       origen: 'WU history/daily (año hidrológico sep-jun)'
     });
 
@@ -349,9 +368,71 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   }
 });
 
+/* ============ Lluvia acumulada año natural 2025 (con fix +200) ============ */
+app.get('/api/lluvia/total/2025', requiereSesionUnica, async (req, res) => {
+  try {
+    const apiKey = process.env.WU_API_KEY;
+    const stationId = process.env.WU_STATION_ID;
+    if (!apiKey || !stationId) {
+      return res.status(400).json({ error:'config_missing', detalle:'Define WU_API_KEY y WU_STATION_ID' });
+    }
+
+    const startDate = new Date(2025, 0, 1); // 1 enero 2025
+    const endDate = new Date(2025, 11, 31); // 31 diciembre 2025
+    
+    const resultado = await calcularLluviaRango(startDate, endDate, true); // Aplicar fix +200
+
+    return res.json({
+      year: '2025',
+      desde: '2025-01-01',
+      hasta: '2025-12-31',
+      dias_contados: resultado.dias_contados,
+      total_mm: resultado.total_mm,
+      origen: 'WU history/daily (año natural 2025 con fix +200)'
+    });
+
+  } catch (e) {
+    console.error('Error /api/lluvia/total/2025:', e);
+    return res.status(500).json({ error:'calc_failed', detalle:String(e.message || e) });
+  }
+});
+
+/* ============ Lluvia acumulada año natural actual (2026) ============ */
+app.get('/api/lluvia/total/current', requiereSesionUnica, async (req, res) => {
+  try {
+    const apiKey = process.env.WU_API_KEY;
+    const stationId = process.env.WU_STATION_ID;
+    if (!apiKey || !stationId) {
+      return res.status(400).json({ error:'config_missing', detalle:'Define WU_API_KEY y WU_STATION_ID' });
+    }
+
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const startDate = new Date(currentYear, 0, 1); // 1 enero del año actual
+    const endDate = now; // Hasta hoy
+    
+    const resultado = await calcularLluviaRango(startDate, endDate, false); // Sin fix
+
+    const pad = (n) => String(n).padStart(2,'0');
+    const formatDate = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+    return res.json({
+      year: currentYear.toString(),
+      desde: formatDate(startDate),
+      hasta: formatDate(endDate),
+      dias_contados: resultado.dias_contados,
+      total_mm: resultado.total_mm,
+      origen: `WU history/daily (año natural ${currentYear})`
+    });
+
+  } catch (e) {
+    console.error('Error /api/lluvia/total/current:', e);
+    return res.status(500).json({ error:'calc_failed', detalle:String(e.message || e) });
+  }
+});
 
 /* ============ Arranque ============ */
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () =>
-  console.log(`🚀 http://0.0.0.0:${PORT} — listo (rutas: /verificar-sesion, /api/weather/*, /api/lluvia/total/year)`)
+  console.log(`🚀 http://0.0.0.0:${PORT} — listo (rutas: /verificar-sesion, /api/weather/*, /api/lluvia/total/*)`)
 );

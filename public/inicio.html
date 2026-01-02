@@ -61,6 +61,38 @@
     font-weight: bold;
     margin-top: 5px;
   }
+  /* Nuevos estilos para las tarjetas de lluvia acumulada */
+  .lluvia-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 15px;
+    margin-top: 10px;
+  }
+  .lluvia-card {
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(100, 116, 139, 0.3);
+    border-radius: 16px;
+    padding: 16px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    text-align: center;
+  }
+  .lluvia-card-title {
+    color: rgba(148, 163, 184, 1);
+    font-size: 0.875rem;
+    margin-bottom: 4px;
+  }
+  .lluvia-card-value {
+    color: rgba(34, 211, 238, 1);
+    font-size: 2rem;
+    font-weight: 800;
+    margin: 4px 0;
+  }
+  .lluvia-card-subtitle {
+    color: rgba(148, 163, 184, 0.7);
+    font-size: 0.75rem;
+    margin-top: 4px;
+  }
   #spinner-mes {
     display: none;
     margin: 10px auto;
@@ -84,11 +116,28 @@
     <h1 class="text-2xl font-bold">📡 Estación Meteorológica en tiempo real cada minuto</h1>
     <div class="data-grid">
 
-      <!-- Tarjeta: Lluvia acumulada (AÑO ACTUAL) -->
-      <div class="bg-slate-800/60 backdrop-blur rounded-2xl p-4 shadow-lg border border-slate-700 w-full max-w-xs">
-        <div class="text-slate-300 text-sm">Lluvia acumulada</div>
-        <div id="total-lluvia" class="text-4xl font-extrabold text-cyan-300 mt-1">--</div>
-        <div id="total-lluvia-rango" class="text-slate-400 text-xs mt-1">(año actual)</div>
+      <!-- Tarjetas de lluvia acumulada -->
+      <div class="lluvia-cards" style="grid-column: 1 / -1;">
+        <!-- Lluvia año hidrológico -->
+        <div class="lluvia-card">
+          <div class="lluvia-card-title">Lluvia acumulada</div>
+          <div id="total-lluvia" class="lluvia-card-value">--</div>
+          <div id="total-lluvia-rango" class="lluvia-card-subtitle">(año hidrológico)</div>
+        </div>
+
+        <!-- Lluvia año 2025 -->
+        <div class="lluvia-card">
+          <div class="lluvia-card-title">Lluvia 2025</div>
+          <div id="total-lluvia-2025" class="lluvia-card-value">--</div>
+          <div class="lluvia-card-subtitle">(año natural)</div>
+        </div>
+
+        <!-- Lluvia año actual -->
+        <div class="lluvia-card">
+          <div class="lluvia-card-title">Lluvia 2026</div>
+          <div id="total-lluvia-actual" class="lluvia-card-value">--</div>
+          <div id="total-lluvia-actual-rango" class="lluvia-card-subtitle">(año natural)</div>
+        </div>
       </div>
 
       <div class="data-box"><p class="label">🌡️ Temperatura</p><p class="value" id="temperature">--</p></div>
@@ -321,7 +370,7 @@
   </script>
 
   <script>
-  // === Cargar total lluvia del año actual desde tu backend ===
+  // === Cargar total lluvia del año hidrológico actual ===
   (async function cargarTotalLluviaAnual(){
     const el = document.getElementById('total-lluvia');
     const rangoEl = document.getElementById('total-lluvia-rango');
@@ -331,17 +380,58 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const mm = Number(data?.total_mm ?? 0);
-      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m2';
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m²';
 
       if (data?.desde && data?.hasta) {
         rangoEl.textContent = `(${data.year}: ${data.desde} → ${data.hasta})`;
       } else {
-        rangoEl.textContent = '(año actual)';
+        rangoEl.textContent = '(año hidrológico)';
       }
     } catch (e) {
       console.error(e);
       el.textContent = '—';
       el.title = 'No se pudo cargar la lluvia anual';
+    }
+  })();
+
+  // === Cargar total lluvia del año 2025 (con fix +200) ===
+  (async function cargarTotalLluvia2025(){
+    const el = document.getElementById('total-lluvia-2025');
+    if (!el) return;
+    try {
+      const r = await fetch(`${window.RAIL_API_BASE}/api/lluvia/total/2025`, { credentials: 'include', cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      const mm = Number(data?.total_mm ?? 0);
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m²';
+    } catch (e) {
+      console.error('Error cargando lluvia 2025:', e);
+      el.textContent = '—';
+      el.title = 'No se pudo cargar la lluvia de 2025';
+    }
+  })();
+
+  // === Cargar total lluvia del año actual (2026) ===
+  (async function cargarTotalLluviaActual(){
+    const el = document.getElementById('total-lluvia-actual');
+    const rangoEl = document.getElementById('total-lluvia-actual-rango');
+    if (!el) return;
+    try {
+      const r = await fetch(`${window.RAIL_API_BASE}/api/lluvia/total/current`, { credentials: 'include', cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      const mm = Number(data?.total_mm ?? 0);
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m²';
+
+      if (data?.desde && data?.hasta) {
+        rangoEl.textContent = `(${data.desde} → ${data.hasta})`;
+      } else {
+        rangoEl.textContent = '(año natural)';
+      }
+    } catch (e) {
+      console.error('Error cargando lluvia actual:', e);
+      el.textContent = '—';
+      el.title = 'No se pudo cargar la lluvia del año actual';
     }
   })();
   </script>
@@ -363,14 +453,3 @@
 
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
