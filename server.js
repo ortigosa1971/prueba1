@@ -220,7 +220,7 @@ app.get('/api/weather/history', requiereSesionUnica, async (req, res) => {
   } catch (e) { console.error(e); res.status(500).json({ error:'Weather history proxy failed' }); }
 });
 
-/* ============ Lluvia acumulada (año hidrológico: septiembre a junio) ============ */
+/* ============ Lluvia acumulada (YTD) por meses (año hidrológico) ============ */
 app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
   try {
     const apiKey    = process.env.WU_API_KEY;
@@ -232,14 +232,14 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
     const now = new Date();
     const pad = (n) => String(n).padStart(2,'0');
 
-    // ========== CAMBIO 1: Calcular año hidrológico (septiembre a junio) ==========
+    // Calcular año hidrológico (septiembre a junio)
     let hydroYear, hydroStart, hydroEnd;
     
-    if (now.getMonth() >= 8) { // Si estamos en septiembre o después (meses 8-11)
+    if (now.getMonth() >= 8) { // Si estamos en septiembre o después
       hydroYear = now.getFullYear();
       hydroStart = new Date(hydroYear, 8, 1); // 1 septiembre del año actual
       hydroEnd = new Date(hydroYear + 1, 5, 30); // 30 junio del año siguiente
-    } else { // Si estamos antes de septiembre (enero-agosto, meses 0-7)
+    } else { // Si estamos antes de septiembre (enero-agosto)
       hydroYear = now.getFullYear() - 1;
       hydroStart = new Date(hydroYear, 8, 1); // 1 septiembre del año anterior
       hydroEnd = new Date(hydroYear + 1, 5, 30); // 30 junio del año actual
@@ -287,7 +287,7 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
       try { return JSON.parse(text); } catch { return { observations: [] }; }
     }
 
-    // ========== CAMBIO 2: Recorrer mes a mes desde septiembre hasta junio ==========
+    // Recorremos mes a mes desde septiembre hasta junio (o fecha actual)
     const perDay = new Map(); // YYYY-MM-DD -> mm
     let currentDate = new Date(hydroStart);
     
@@ -321,24 +321,21 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
     const lista = Array.from(perDay.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     const total = lista.reduce((acc, [, mm]) => acc + (Number.isFinite(mm) ? mm : 0), 0);
 
-    // ========== CAMBIO 3: Función helper para formatear fechas ==========
     const formatDate = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 
     if (req.query.debug === '1') {
       return res.json({
-        // ========== CAMBIO 4: Respuesta con datos del año hidrológico ==========
-        year_hidrologico: `${hydroYear}/${hydroYear + 1}`,
+        year: `${hydroYear}/${hydroYear + 1}`,
         desde: formatDate(hydroStart),
         hasta: formatDate(hydroEnd),
         dias_contados: lista.length,
-        total_mm: Number(total.toFixed(2)) + 200, 
+        total_mm: Number(total.toFixed(2)) + 200,
         muestra: lista.slice(-10).map(([fecha, mm]) => ({ fecha, mm })),
       });
     }
 
     return res.json({
-      // ========== CAMBIO 5: Respuesta final con datos del año hidrológico ==========
-      year_hidrologico: `${hydroYear}/${hydroYear + 1}`,
+      year: `${hydroYear}/${hydroYear + 1}`,
       desde: formatDate(hydroStart),
       hasta: formatDate(hydroEnd),
       dias_contados: lista.length,
@@ -351,6 +348,7 @@ app.get('/api/lluvia/total/year', requiereSesionUnica, async (req, res) => {
     return res.status(500).json({ error:'calc_failed', detalle:String(e.message || e) });
   }
 });
+
 
 /* ============ Arranque ============ */
 const PORT = process.env.PORT || 8080;
