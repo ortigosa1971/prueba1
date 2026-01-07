@@ -380,7 +380,7 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const mm = Number(data?.total_mm ?? 0);
-      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m²';
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' mm';
 
       if (data?.desde && data?.hasta) {
         rangoEl.textContent = `(${data.year}: ${data.desde} → ${data.hasta})`;
@@ -403,7 +403,7 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const mm = Number(data?.total_mm ?? 0);
-      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m²';
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' mm';
     } catch (e) {
       console.error('Error cargando lluvia 2025:', e);
       el.textContent = '—';
@@ -421,7 +421,7 @@
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const mm = Number(data?.total_mm ?? 0);
-      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' L/m²';
+      el.textContent = (Number.isFinite(mm) ? mm : 0).toFixed(1) + ' mm';
 
       if (data?.desde && data?.hasta) {
         rangoEl.textContent = `(${data.desde} → ${data.hasta})`;
