@@ -161,7 +161,7 @@ app.get('/verificar-sesion', (req, res) => {
 });
 
 /* ============ Historial URL (front lo usa) ============ */
-const HISTORIAL_FALLBACK = 'https://prueba2-production-50d4.up.railway.app/';
+const HISTORIAL_FALLBACK = 'https://prueba2-production-dcd0.up.railway.app/';
 app.get('/historial-url', (req, res) => {
   res.json({ url: process.env.HISTORIAL_URL || HISTORIAL_FALLBACK });
 });
